@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
 const tariffs = [
@@ -55,6 +55,7 @@ function statusColor(status: string) {
 }
 
 type WarehouseCountry = "Germany" | "Serbia";
+type AuthMode = "register" | "login";
 
 type User = {
   name: string;
@@ -79,7 +80,11 @@ type PackageItem = {
 };
 
 export default function Page() {
+  const [authMode, setAuthMode] = useState<AuthMode>("register");
+  const [loadingSession, setLoadingSession] = useState(true);
+  const [authLoading, setAuthLoading] = useState(false);
   const [isRegistered, setIsRegistered] = useState(false);
+
   const [user, setUser] = useState<User>({
     name: "",
     email: "",
@@ -105,56 +110,166 @@ export default function Page() {
     status: "Expected",
   });
 
-  const handleRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    const generatedCustomerId = generateCustomerId();
-    const finalAddress = makeAddress(
-      user.name || "Customer",
-      generatedCustomerId,
-      user.warehouseCountry
-    );
-
-    const { data, error } = await supabase.auth.signUp({
-      email: user.email,
-      password: user.password,
-    });
+  async function loadProfile(authUserId: string) {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("full_name, email, customer_id, warehouse_country, warehouse_address")
+      .eq("id", authUserId)
+      .single();
 
     if (error) {
-      alert(error.message);
-      console.error("Sign up error:", error);
-      return;
-    }
-
-    const authUser = data.user;
-
-    if (!authUser) {
-      alert("User not created");
-      return;
-    }
-
-    const { error: profileError } = await supabase.from("profiles").insert({
-      id: authUser.id,
-      customer_id: generatedCustomerId,
-      full_name: user.name,
-      email: user.email,
-      warehouse_country: user.warehouseCountry,
-      warehouse_address: finalAddress,
-    });
-
-    if (profileError) {
-      alert(profileError.message);
-      console.error("Profile insert error:", profileError);
-      return;
+      console.error("Profile load error:", error);
+      return false;
     }
 
     setUser((prev) => ({
       ...prev,
-      id: generatedCustomerId,
-      address: finalAddress,
+      name: data.full_name ?? "",
+      email: data.email ?? "",
+      password: "",
+      warehouseCountry: (data.warehouse_country as WarehouseCountry) ?? "Germany",
+      id: data.customer_id ?? "",
+      address: data.warehouse_address ?? "",
     }));
 
     setIsRegistered(true);
+    return true;
+  }
+
+  useEffect(() => {
+    async function bootstrap() {
+      const { data, error } = await supabase.auth.getSession();
+
+      if (error) {
+        console.error("Session error:", error);
+        setLoadingSession(false);
+        return;
+      }
+
+      const session = data.session;
+
+      if (session?.user) {
+        await loadProfile(session.user.id);
+      }
+
+      setLoadingSession(false);
+    }
+
+    bootstrap();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        await loadProfile(session.user.id);
+      } else {
+        setIsRegistered(false);
+        setUser({
+          name: "",
+          email: "",
+          password: "",
+          warehouseCountry: "Germany",
+          id: "",
+          address: "",
+        });
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+
+    try {
+      const generatedCustomerId = generateCustomerId();
+      const finalAddress = makeAddress(
+        user.name || "Customer",
+        generatedCustomerId,
+        user.warehouseCountry
+      );
+
+      const { data, error } = await supabase.auth.signUp({
+        email: user.email,
+        password: user.password,
+      });
+
+      if (error) {
+        alert(error.message);
+        console.error("Sign up error:", error);
+        return;
+      }
+
+      const authUser = data.user;
+
+      if (!authUser) {
+        alert("User not created");
+        return;
+      }
+
+      const { error: profileError } = await supabase.from("profiles").insert({
+        id: authUser.id,
+        customer_id: generatedCustomerId,
+        full_name: user.name,
+        email: user.email,
+        warehouse_country: user.warehouseCountry,
+        warehouse_address: finalAddress,
+      });
+
+      if (profileError) {
+        alert(profileError.message);
+        console.error("Profile insert error:", profileError);
+        return;
+      }
+
+      setUser((prev) => ({
+        ...prev,
+        id: generatedCustomerId,
+        address: finalAddress,
+      }));
+
+      setIsRegistered(true);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password: user.password,
+      });
+
+      if (error) {
+        alert(error.message);
+        console.error("Login error:", error);
+        return;
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    const { error } = await supabase.auth.signOut();
+
+    if (error) {
+      alert(error.message);
+      console.error("Logout error:", error);
+      return;
+    }
+
+    setIsRegistered(false);
+    setAuthMode("login");
+    setPackages([]);
+    setSelectedPackages([]);
   };
 
   const handleAddPackage = (e: React.FormEvent) => {
@@ -238,6 +353,16 @@ export default function Page() {
     setActiveTab("dashboard");
   };
 
+  if (loadingSession) {
+    return (
+      <main className="min-h-screen bg-slate-100 px-4 py-8">
+        <div className="mx-auto max-w-4xl rounded-3xl bg-white p-8 shadow-sm">
+          <div className="text-lg font-semibold text-slate-900">Loading session...</div>
+        </div>
+      </main>
+    );
+  }
+
   if (!isRegistered) {
     return (
       <main className="min-h-screen bg-slate-100 px-4 py-8">
@@ -246,27 +371,61 @@ export default function Page() {
             <div className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
               <div>
                 <div className="inline-flex rounded-full bg-slate-900 px-3 py-1 text-sm text-white">Forwarding MVP</div>
-                <h1 className="mt-4 text-4xl font-bold tracking-tight text-slate-900">Create your forwarding account</h1>
+                <h1 className="mt-4 text-4xl font-bold tracking-tight text-slate-900">
+                  {authMode === "register" ? "Create your forwarding account" : "Sign in to your account"}
+                </h1>
                 <p className="mt-4 max-w-xl text-base leading-7 text-slate-600">
                   Register, get your personal warehouse ID, receive your EU delivery address, add parcels manually by tracking number, and manage consolidation and checkout in one dashboard.
                 </p>
               </div>
 
-              <form onSubmit={handleRegister} className="rounded-3xl border border-slate-200 bg-slate-50 p-6">
-                <h2 className="text-2xl font-bold text-slate-900">Sign up</h2>
-                <p className="mt-2 text-sm text-slate-500">This demo generates a customer ID and warehouse address instantly.</p>
+              <form
+                onSubmit={authMode === "register" ? handleRegister : handleLogin}
+                className="rounded-3xl border border-slate-200 bg-slate-50 p-6"
+              >
+                <div className="mb-4 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAuthMode("register")}
+                    className={`rounded-2xl px-4 py-2 text-sm font-medium ${
+                      authMode === "register" ? "bg-slate-900 text-white" : "bg-white text-slate-600"
+                    }`}
+                  >
+                    Register
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAuthMode("login")}
+                    className={`rounded-2xl px-4 py-2 text-sm font-medium ${
+                      authMode === "login" ? "bg-slate-900 text-white" : "bg-white text-slate-600"
+                    }`}
+                  >
+                    Login
+                  </button>
+                </div>
+
+                <h2 className="text-2xl font-bold text-slate-900">
+                  {authMode === "register" ? "Sign up" : "Sign in"}
+                </h2>
+                <p className="mt-2 text-sm text-slate-500">
+                  {authMode === "register"
+                    ? "Create a new account and get your warehouse address."
+                    : "Use your email and password to access your dashboard."}
+                </p>
 
                 <div className="mt-6 space-y-4">
-                  <div>
-                    <label className="mb-2 block text-sm font-medium">Full name</label>
-                    <input
-                      className="w-full rounded-2xl border border-slate-300 px-4 py-3"
-                      value={user.name}
-                      onChange={(e) => setUser((prev) => ({ ...prev, name: e.target.value }))}
-                      placeholder="Alex Morgan"
-                      required
-                    />
-                  </div>
+                  {authMode === "register" && (
+                    <div>
+                      <label className="mb-2 block text-sm font-medium">Full name</label>
+                      <input
+                        className="w-full rounded-2xl border border-slate-300 px-4 py-3"
+                        value={user.name}
+                        onChange={(e) => setUser((prev) => ({ ...prev, name: e.target.value }))}
+                        placeholder="Alex Morgan"
+                        required
+                      />
+                    </div>
+                  )}
 
                   <div>
                     <label className="mb-2 block text-sm font-medium">Email</label>
@@ -292,26 +451,36 @@ export default function Page() {
                     />
                   </div>
 
-                  <div>
-                    <label className="mb-2 block text-sm font-medium">Warehouse location</label>
-                    <select
-                      className="w-full rounded-2xl border border-slate-300 px-4 py-3"
-                      value={user.warehouseCountry}
-                      onChange={(e) =>
-                        setUser((prev) => ({
-                          ...prev,
-                          warehouseCountry: e.target.value as WarehouseCountry,
-                        }))
-                      }
-                    >
-                      <option value="Germany">Germany</option>
-                      <option value="Serbia">Serbia</option>
-                    </select>
-                  </div>
+                  {authMode === "register" && (
+                    <div>
+                      <label className="mb-2 block text-sm font-medium">Warehouse location</label>
+                      <select
+                        className="w-full rounded-2xl border border-slate-300 px-4 py-3"
+                        value={user.warehouseCountry}
+                        onChange={(e) =>
+                          setUser((prev) => ({
+                            ...prev,
+                            warehouseCountry: e.target.value as WarehouseCountry,
+                          }))
+                        }
+                      >
+                        <option value="Germany">Germany</option>
+                        <option value="Serbia">Serbia</option>
+                      </select>
+                    </div>
+                  )}
                 </div>
 
-                <button type="submit" className="mt-6 w-full rounded-2xl bg-slate-900 px-4 py-3 font-medium text-white">
-                  Create account
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="mt-6 w-full rounded-2xl bg-slate-900 px-4 py-3 font-medium text-white disabled:opacity-60"
+                >
+                  {authLoading
+                    ? "Please wait..."
+                    : authMode === "register"
+                    ? "Create account"
+                    : "Sign in"}
                 </button>
               </form>
             </div>
@@ -332,9 +501,17 @@ export default function Page() {
                 <h1 className="mt-2 text-3xl font-bold text-slate-900">Welcome, {user.name}</h1>
                 <p className="mt-2 text-slate-600">Manage incoming parcels, assign shipping instructions, and complete payment from one place.</p>
               </div>
-              <div className="rounded-2xl bg-slate-900 px-4 py-3 text-white">
-                <div className="text-xs uppercase tracking-wide text-slate-300">Customer ID</div>
-                <div className="mt-1 text-2xl font-bold">#{user.id}</div>
+              <div className="flex gap-3">
+                <div className="rounded-2xl bg-slate-900 px-4 py-3 text-white">
+                  <div className="text-xs uppercase tracking-wide text-slate-300">Customer ID</div>
+                  <div className="mt-1 text-2xl font-bold">#{user.id}</div>
+                </div>
+                <button
+                  onClick={handleLogout}
+                  className="rounded-2xl border border-slate-300 px-4 py-3 text-sm font-medium text-slate-700"
+                >
+                  Log out
+                </button>
               </div>
             </div>
           </div>
