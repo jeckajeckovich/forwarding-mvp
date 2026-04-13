@@ -110,7 +110,7 @@ export default function Page() {
     status: "Expected",
   });
 
- async function loadProfile(authUserId: string) {
+async function loadProfile(authUserId: string) {
   const { data, error } = await supabase
     .from("profiles")
     .select("full_name, email, customer_id, warehouse_country, warehouse_address")
@@ -137,11 +137,24 @@ export default function Page() {
     address: data.warehouse_address ?? "",
   }));
 
+  return true;
+}
+
+  setUser((prev) => ({
+    ...prev,
+    name: data.full_name ?? "",
+    email: data.email ?? "",
+    password: "",
+    warehouseCountry: (data.warehouse_country as WarehouseCountry) ?? "Germany",
+    id: data.customer_id ?? "",
+    address: data.warehouse_address ?? "",
+  }));
+
   setIsRegistered(true);
   return true;
 }
 
- useEffect(() => {
+useEffect(() => {
   let mounted = true;
 
   async function bootstrap() {
@@ -157,13 +170,22 @@ export default function Page() {
 
       if (!mounted) return;
 
+      setLoadingSession(false);
+
       if (session?.user) {
         const loaded = await loadProfile(session.user.id);
 
         if (!mounted) return;
 
+        // Даже если профиль не загрузился, пользователя не выбрасываем
+        setIsRegistered(true);
+
         if (!loaded) {
-          setIsRegistered(false);
+          setUser((prev) => ({
+            ...prev,
+            email: session.user.email ?? "",
+            password: "",
+          }));
         }
       } else {
         setIsRegistered(false);
@@ -171,11 +193,8 @@ export default function Page() {
     } catch (err) {
       console.error("Bootstrap crash:", err);
       if (mounted) {
-        setIsRegistered(false);
-      }
-    } finally {
-      if (mounted) {
         setLoadingSession(false);
+        setIsRegistered(false);
       }
     }
   }
@@ -185,12 +204,23 @@ export default function Page() {
   const {
     data: { subscription },
   } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    if (!mounted) return;
+
+    setLoadingSession(false);
+
     try {
       if (session?.user) {
         const loaded = await loadProfile(session.user.id);
 
+        // Не выбрасываем auth-пользователя, даже если профиль не подтянулся
+        setIsRegistered(true);
+
         if (!loaded) {
-          setIsRegistered(false);
+          setUser((prev) => ({
+            ...prev,
+            email: session.user.email ?? "",
+            password: "",
+          }));
         }
       } else {
         setIsRegistered(false);
@@ -205,9 +235,9 @@ export default function Page() {
       }
     } catch (err) {
       console.error("Auth state change crash:", err);
-      setIsRegistered(false);
-    } finally {
-      setLoadingSession(false);
+      if (mounted) {
+        setIsRegistered(false);
+      }
     }
   });
 
@@ -274,25 +304,29 @@ export default function Page() {
     }
   };
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthLoading(true);
+const handleLogin = async (e: React.FormEvent) => {
+  e.preventDefault();
+  setAuthLoading(true);
 
-    try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email: user.email,
-        password: user.password,
-      });
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: user.email,
+      password: user.password,
+    });
 
-      if (error) {
-        alert(error.message);
-        console.error("Login error:", error);
-        return;
-      }
-    } finally {
-      setAuthLoading(false);
+    if (error) {
+      alert(error.message);
+      console.error("Login error:", error);
+      return;
     }
-  };
+
+    if (data.user) {
+      setIsRegistered(true);
+    }
+  } finally {
+    setAuthLoading(false);
+  }
+};
 
   const handleLogout = async () => {
     const { error } = await supabase.auth.signOut();
