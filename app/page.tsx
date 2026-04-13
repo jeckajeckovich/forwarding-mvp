@@ -168,8 +168,8 @@ async function bootstrap() {
     bootstrap();
 
     const {
-      data: { subscription },
-supabase.auth.onAuthStateChange(async (_event, session) => {
+  data: { subscription },
+} = supabase.auth.onAuthStateChange(async (_event, session) => {
   if (session?.user) {
     const loaded = await loadProfile(session.user.id);
 
