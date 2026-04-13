@@ -141,42 +141,58 @@ export default function Page() {
   return true;
 }
 
-  useEffect(() => {
-async function bootstrap() {
-  const { data, error } = await supabase.auth.getSession();
+ useEffect(() => {
+  let mounted = true;
 
-  if (error) {
-    console.error("Session error:", error);
-    setLoadingSession(false);
-    return;
-  }
+  async function bootstrap() {
+    try {
+      const { data, error } = await supabase.auth.getSession();
 
-  const session = data.session;
+      if (error) {
+        console.error("Session error:", error);
+        return;
+      }
 
-  if (session?.user) {
-    const loaded = await loadProfile(session.user.id);
+      const session = data.session;
 
-    if (!loaded) {
-      console.log("Profile not loaded, forcing logout state");
-      setIsRegistered(false);
+      if (!mounted) return;
+
+      if (session?.user) {
+        const loaded = await loadProfile(session.user.id);
+
+        if (!mounted) return;
+
+        if (!loaded) {
+          setIsRegistered(false);
+        }
+      } else {
+        setIsRegistered(false);
+      }
+    } catch (err) {
+      console.error("Bootstrap crash:", err);
+      if (mounted) {
+        setIsRegistered(false);
+      }
+    } finally {
+      if (mounted) {
+        setLoadingSession(false);
+      }
     }
   }
 
-  setLoadingSession(false);
-}
+  bootstrap();
 
-    bootstrap();
+  const {
+    data: { subscription },
+  } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    try {
+      if (session?.user) {
+        const loaded = await loadProfile(session.user.id);
 
-    const {
-  data: { subscription },
-} = supabase.auth.onAuthStateChange(async (_event, session) => {
-  if (session?.user) {
-    const loaded = await loadProfile(session.user.id);
-
-    if (!loaded) {
-      setIsRegistered(false);
-    }
-  } else {
+        if (!loaded) {
+          setIsRegistered(false);
+        }
+      } else {
         setIsRegistered(false);
         setUser({
           name: "",
@@ -187,12 +203,19 @@ async function bootstrap() {
           address: "",
         });
       }
-    });
+    } catch (err) {
+      console.error("Auth state change crash:", err);
+      setIsRegistered(false);
+    } finally {
+      setLoadingSession(false);
+    }
+  });
 
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, []);
+  return () => {
+    mounted = false;
+    subscription.unsubscribe();
+  };
+}, []);
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
