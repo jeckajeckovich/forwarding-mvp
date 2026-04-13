@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { supabase } from "@/lib/supabase";
 
 const tariffs = [
   { country: "Kenya", standardPerKg: 12, expressPerKg: 18, minPrice: 25, delivery: "10–20 days" },
@@ -104,11 +105,55 @@ export default function Page() {
     status: "Expected",
   });
 
-  const handleRegister = (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    const id = generateCustomerId();
-    const finalAddress = makeAddress(user.name || "Customer", id, user.warehouseCountry);
-    setUser((prev) => ({ ...prev, id, address: finalAddress }));
+
+    const generatedCustomerId = generateCustomerId();
+    const finalAddress = makeAddress(
+      user.name || "Customer",
+      generatedCustomerId,
+      user.warehouseCountry
+    );
+
+    const { data, error } = await supabase.auth.signUp({
+      email: user.email,
+      password: user.password,
+    });
+
+    if (error) {
+      alert(error.message);
+      console.error("Sign up error:", error);
+      return;
+    }
+
+    const authUser = data.user;
+
+    if (!authUser) {
+      alert("User not created");
+      return;
+    }
+
+    const { error: profileError } = await supabase.from("profiles").insert({
+      id: authUser.id,
+      customer_id: generatedCustomerId,
+      full_name: user.name,
+      email: user.email,
+      warehouse_country: user.warehouseCountry,
+      warehouse_address: finalAddress,
+    });
+
+    if (profileError) {
+      alert(profileError.message);
+      console.error("Profile insert error:", profileError);
+      return;
+    }
+
+    setUser((prev) => ({
+      ...prev,
+      id: generatedCustomerId,
+      address: finalAddress,
+    }));
+
     setIsRegistered(true);
   };
 
