@@ -127,18 +127,6 @@ async function loadProfile(authUserId: string) {
     return false;
   }
 
-  setUser((prev) => ({
-    ...prev,
-    name: data.full_name ?? "",
-    email: data.email ?? "",
-    password: "",
-    warehouseCountry: (data.warehouse_country as WarehouseCountry) ?? "Germany",
-    id: data.customer_id ?? "",
-    address: data.warehouse_address ?? "",
-  }));
-
-  return true;
-}
 
   setUser((prev) => ({
     ...prev,
