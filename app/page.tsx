@@ -110,59 +110,73 @@ export default function Page() {
     status: "Expected",
   });
 
-  async function loadProfile(authUserId: string) {
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("full_name, email, customer_id, warehouse_country, warehouse_address")
-      .eq("id", authUserId)
-      .single();
+ async function loadProfile(authUserId: string) {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("full_name, email, customer_id, warehouse_country, warehouse_address")
+    .eq("id", authUserId)
+    .maybeSingle();
 
-    if (error) {
-      console.error("Profile load error:", error);
-      return false;
-    }
-
-    setUser((prev) => ({
-      ...prev,
-      name: data.full_name ?? "",
-      email: data.email ?? "",
-      password: "",
-      warehouseCountry: (data.warehouse_country as WarehouseCountry) ?? "Germany",
-      id: data.customer_id ?? "",
-      address: data.warehouse_address ?? "",
-    }));
-
-    setIsRegistered(true);
-    return true;
+  if (error) {
+    console.error("Profile load error:", error);
+    return false;
   }
 
+  if (!data) {
+    console.log("No profile found yet");
+    return false;
+  }
+
+  setUser((prev) => ({
+    ...prev,
+    name: data.full_name ?? "",
+    email: data.email ?? "",
+    password: "",
+    warehouseCountry: (data.warehouse_country as WarehouseCountry) ?? "Germany",
+    id: data.customer_id ?? "",
+    address: data.warehouse_address ?? "",
+  }));
+
+  setIsRegistered(true);
+  return true;
+}
+
   useEffect(() => {
-    async function bootstrap() {
-      const { data, error } = await supabase.auth.getSession();
+async function bootstrap() {
+  const { data, error } = await supabase.auth.getSession();
 
-      if (error) {
-        console.error("Session error:", error);
-        setLoadingSession(false);
-        return;
-      }
+  if (error) {
+    console.error("Session error:", error);
+    setLoadingSession(false);
+    return;
+  }
 
-      const session = data.session;
+  const session = data.session;
 
-      if (session?.user) {
-        await loadProfile(session.user.id);
-      }
+  if (session?.user) {
+    const loaded = await loadProfile(session.user.id);
 
-      setLoadingSession(false);
+    if (!loaded) {
+      console.log("Profile not loaded, forcing logout state");
+      setIsRegistered(false);
     }
+  }
+
+  setLoadingSession(false);
+}
 
     bootstrap();
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user) {
-        await loadProfile(session.user.id);
-      } else {
+supabase.auth.onAuthStateChange(async (_event, session) => {
+  if (session?.user) {
+    const loaded = await loadProfile(session.user.id);
+
+    if (!loaded) {
+      setIsRegistered(false);
+    }
+  } else {
         setIsRegistered(false);
         setUser({
           name: "",
