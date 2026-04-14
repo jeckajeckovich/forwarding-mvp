@@ -110,130 +110,130 @@ export default function Page() {
     status: "Expected",
   });
 
-async function loadProfile(authUserId: string) {
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("full_name, email, customer_id, warehouse_country, warehouse_address")
-    .eq("id", authUserId)
-    .maybeSingle();
+  async function loadProfile(authUserId: string) {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("full_name, email, customer_id, warehouse_country, warehouse_address")
+      .eq("id", authUserId)
+      .maybeSingle();
 
-  if (error) {
-    console.error("Profile load error:", error);
-    return false;
+    if (error) {
+      console.error("Profile load error:", error);
+      return false;
+    }
+
+    if (!data) {
+      return false;
+    }
+
+    setUser((prev) => ({
+      ...prev,
+      name: data.full_name ?? "",
+      email: data.email ?? "",
+      password: "",
+      warehouseCountry: (data.warehouse_country as WarehouseCountry) ?? "Germany",
+      id: data.customer_id ?? "",
+      address: data.warehouse_address ?? "",
+    }));
+
+    return true;
   }
 
-  if (!data) {
-    console.log("No profile found yet");
-    return false;
-  }
+  useEffect(() => {
+    let mounted = true;
 
+    async function bootstrap() {
+      try {
+        const { data, error } = await supabase.auth.getSession();
 
-  setUser((prev) => ({
-    ...prev,
-    name: data.full_name ?? "",
-    email: data.email ?? "",
-    password: "",
-    warehouseCountry: (data.warehouse_country as WarehouseCountry) ?? "Germany",
-    id: data.customer_id ?? "",
-    address: data.warehouse_address ?? "",
-  }));
+        if (error) {
+          console.error("Session error:", error);
+          return;
+        }
 
-  setIsRegistered(true);
-  return true;
-}
-
-useEffect(() => {
-  let mounted = true;
-
-  async function bootstrap() {
-    try {
-      const { data, error } = await supabase.auth.getSession();
-
-      if (error) {
-        console.error("Session error:", error);
-        return;
-      }
-
-      const session = data.session;
-
-      if (!mounted) return;
-
-      setLoadingSession(false);
-
-      if (session?.user) {
-        const loaded = await loadProfile(session.user.id);
+        const session = data.session;
 
         if (!mounted) return;
 
-        // Даже если профиль не загрузился, пользователя не выбрасываем
-        setIsRegistered(true);
+        if (session?.user) {
+          const loaded = await loadProfile(session.user.id);
 
-        if (!loaded) {
-          setUser((prev) => ({
-            ...prev,
-            email: session.user.email ?? "",
-            password: "",
-          }));
+          if (!mounted) return;
+
+          setIsRegistered(true);
+
+          if (!loaded) {
+            setUser((prev) => ({
+              ...prev,
+              email: session.user.email ?? "",
+              password: "",
+            }));
+          }
+        } else {
+          setIsRegistered(false);
         }
-      } else {
-        setIsRegistered(false);
-      }
-    } catch (err) {
-      console.error("Bootstrap crash:", err);
-      if (mounted) {
-        setLoadingSession(false);
-        setIsRegistered(false);
+      } catch (err) {
+        console.error("Bootstrap crash:", err);
+        if (mounted) {
+          setIsRegistered(false);
+        }
+      } finally {
+        if (mounted) {
+          setLoadingSession(false);
+        }
       }
     }
-  }
 
-  bootstrap();
+    bootstrap();
 
-  const {
-    data: { subscription },
-  } = supabase.auth.onAuthStateChange(async (_event, session) => {
-    if (!mounted) return;
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!mounted) return;
 
-    setLoadingSession(false);
+      try {
+        if (session?.user) {
+          const loaded = await loadProfile(session.user.id);
 
-    try {
-      if (session?.user) {
-        const loaded = await loadProfile(session.user.id);
+          if (!mounted) return;
 
-        // Не выбрасываем auth-пользователя, даже если профиль не подтянулся
-        setIsRegistered(true);
+          setIsRegistered(true);
 
-        if (!loaded) {
-          setUser((prev) => ({
-            ...prev,
-            email: session.user.email ?? "",
+          if (!loaded) {
+            setUser((prev) => ({
+              ...prev,
+              email: session.user.email ?? "",
+              password: "",
+            }));
+          }
+        } else {
+          setIsRegistered(false);
+          setUser({
+            name: "",
+            email: "",
             password: "",
-          }));
+            warehouseCountry: "Germany",
+            id: "",
+            address: "",
+          });
         }
-      } else {
-        setIsRegistered(false);
-        setUser({
-          name: "",
-          email: "",
-          password: "",
-          warehouseCountry: "Germany",
-          id: "",
-          address: "",
-        });
+      } catch (err) {
+        console.error("Auth state change crash:", err);
+        if (mounted) {
+          setIsRegistered(false);
+        }
+      } finally {
+        if (mounted) {
+          setLoadingSession(false);
+        }
       }
-    } catch (err) {
-      console.error("Auth state change crash:", err);
-      if (mounted) {
-        setIsRegistered(false);
-      }
-    }
-  });
+    });
 
-  return () => {
-    mounted = false;
-    subscription.unsubscribe();
-  };
-}, []);
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -250,6 +250,10 @@ useEffect(() => {
       const { data, error } = await supabase.auth.signUp({
         email: user.email,
         password: user.password,
+        options: {
+          emailRedirectTo:
+            typeof window !== "undefined" ? window.location.origin : undefined,
+        },
       });
 
       if (error) {
@@ -265,7 +269,7 @@ useEffect(() => {
         return;
       }
 
-      const { error: profileError } = await supabase.from("profiles").insert({
+      const { error: profileError } = await supabase.from("profiles").upsert({
         id: authUser.id,
         customer_id: generatedCustomerId,
         full_name: user.name,
@@ -280,41 +284,57 @@ useEffect(() => {
         return;
       }
 
+      alert("Account created. Check your email to confirm it, then sign in.");
+
+      setAuthMode("login");
+      setIsRegistered(false);
       setUser((prev) => ({
         ...prev,
+        password: "",
         id: generatedCustomerId,
         address: finalAddress,
       }));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: user.email,
+        password: user.password,
+      });
+
+      if (error) {
+        alert(error.message);
+        console.error("Login error:", error);
+        return;
+      }
+
+      if (!data.user) {
+        alert("Login failed");
+        return;
+      }
+
+      const loaded = await loadProfile(data.user.id);
+
+      if (!loaded) {
+        setUser((prev) => ({
+          ...prev,
+          email: data.user.email ?? prev.email,
+          password: "",
+        }));
+      }
 
       setIsRegistered(true);
     } finally {
       setAuthLoading(false);
     }
   };
-
-const handleLogin = async (e: React.FormEvent) => {
-  e.preventDefault();
-  setAuthLoading(true);
-
-  try {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: user.email,
-      password: user.password,
-    });
-
-    if (error) {
-      alert(error.message);
-      console.error("Login error:", error);
-      return;
-    }
-
-    if (data.user) {
-      setIsRegistered(true);
-    }
-  } finally {
-    setAuthLoading(false);
-  }
-};
 
   const handleLogout = async () => {
     const { error } = await supabase.auth.signOut();
@@ -329,6 +349,14 @@ const handleLogin = async (e: React.FormEvent) => {
     setAuthMode("login");
     setPackages([]);
     setSelectedPackages([]);
+    setUser({
+      name: "",
+      email: "",
+      password: "",
+      warehouseCountry: "Germany",
+      id: "",
+      address: "",
+    });
   };
 
   const handleAddPackage = (e: React.FormEvent) => {
@@ -416,7 +444,7 @@ const handleLogin = async (e: React.FormEvent) => {
     return (
       <main className="min-h-screen bg-slate-100 px-4 py-8">
         <div className="mx-auto max-w-4xl rounded-3xl bg-white p-8 shadow-sm">
-          <div className="text-lg font-semibold text-slate-900">Loading session...</div>
+          <div className="text-lg font-semibold text-slate-900">Checking session...</div>
         </div>
       </main>
     );
@@ -429,12 +457,17 @@ const handleLogin = async (e: React.FormEvent) => {
           <section className="rounded-3xl bg-white p-8 shadow-sm">
             <div className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
               <div>
-                <div className="inline-flex rounded-full bg-slate-900 px-3 py-1 text-sm text-white">Forwarding MVP</div>
+                <div className="inline-flex rounded-full bg-slate-900 px-3 py-1 text-sm text-white">
+                  Forwarding MVP
+                </div>
                 <h1 className="mt-4 text-4xl font-bold tracking-tight text-slate-900">
-                  {authMode === "register" ? "Create your forwarding account" : "Sign in to your account"}
+                  {authMode === "register"
+                    ? "Create your forwarding account"
+                    : "Sign in to your account"}
                 </h1>
                 <p className="mt-4 max-w-xl text-base leading-7 text-slate-600">
-                  Register, get your personal warehouse ID, receive your EU delivery address, add parcels manually by tracking number, and manage consolidation and checkout in one dashboard.
+                  Register, get your personal warehouse ID, receive your EU delivery address,
+                  add parcels manually by tracking number, and manage consolidation and checkout in one dashboard.
                 </p>
               </div>
 
@@ -557,13 +590,15 @@ const handleLogin = async (e: React.FormEvent) => {
             <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
               <div>
                 <div className="text-sm text-slate-500">Customer dashboard</div>
-                <h1 className="mt-2 text-3xl font-bold text-slate-900">Welcome, {user.name}</h1>
-                <p className="mt-2 text-slate-600">Manage incoming parcels, assign shipping instructions, and complete payment from one place.</p>
+                <h1 className="mt-2 text-3xl font-bold text-slate-900">Welcome, {user.name || "Customer"}</h1>
+                <p className="mt-2 text-slate-600">
+                  Manage incoming parcels, assign shipping instructions, and complete payment from one place.
+                </p>
               </div>
               <div className="flex gap-3">
                 <div className="rounded-2xl bg-slate-900 px-4 py-3 text-white">
                   <div className="text-xs uppercase tracking-wide text-slate-300">Customer ID</div>
-                  <div className="mt-1 text-2xl font-bold">#{user.id}</div>
+                  <div className="mt-1 text-2xl font-bold">#{user.id || "—"}</div>
                 </div>
                 <button
                   onClick={handleLogout}
@@ -579,7 +614,7 @@ const handleLogin = async (e: React.FormEvent) => {
             <h2 className="text-xl font-bold">Your warehouse address</h2>
             <p className="mt-2 text-sm text-slate-500">Use this address when placing orders in European stores.</p>
             <div className="mt-4 rounded-2xl bg-slate-900 p-4 text-sm leading-7 text-white">
-              {user.address}
+              {user.address || "Profile address will appear here after profile sync."}
             </div>
           </div>
         </section>
