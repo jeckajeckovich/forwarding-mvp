@@ -247,15 +247,10 @@ export default function Page() {
         user.warehouseCountry
       );
 
-      const { data, error } = await supabase.auth.signUp({
-        email: user.email,
-        password: user.password,
-        options: {
-          emailRedirectTo:
-            typeof window !== "undefined" ? window.location.origin : undefined,
-        },
-      });
-
+  const { data, error } = await supabase.auth.signInWithPassword({
+  email: user.email.trim().toLowerCase(),
+  password: user.password.trim(),
+});
       if (error) {
         alert(error.message);
         console.error("Sign up error:", error);
