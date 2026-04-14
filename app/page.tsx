@@ -235,101 +235,108 @@ export default function Page() {
     };
   }, []);
 
-  const handleRegister = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthLoading(true);
+const handleRegister = async (e: React.FormEvent) => {
+  e.preventDefault();
+  setAuthLoading(true);
 
-    try {
-      const generatedCustomerId = generateCustomerId();
-      const finalAddress = makeAddress(
-        user.name || "Customer",
-        generatedCustomerId,
-        user.warehouseCountry
-      );
+  try {
+    const generatedCustomerId = generateCustomerId();
+    const finalAddress = makeAddress(
+      user.name || "Customer",
+      generatedCustomerId,
+      user.warehouseCountry
+    );
 
-  const { data, error } = await supabase.auth.signInWithPassword({
-  email: user.email.trim().toLowerCase(),
-  password: user.password.trim(),
-});
-      if (error) {
-        alert(error.message);
-        console.error("Sign up error:", error);
-        return;
-      }
+    const safeEmail = user.email.trim().toLowerCase();
+    const safePassword = user.password.trim();
 
-      const authUser = data.user;
+    const { data, error } = await supabase.auth.signUp({
+      email: safeEmail,
+      password: safePassword,
+    });
 
-      if (!authUser) {
-        alert("User not created");
-        return;
-      }
+    if (error) {
+      alert(error.message);
+      console.error("Sign up error:", error);
+      return;
+    }
 
-      const { error: profileError } = await supabase.from("profiles").upsert({
-        id: authUser.id,
-        customer_id: generatedCustomerId,
-        full_name: user.name,
-        email: user.email,
-        warehouse_country: user.warehouseCountry,
-        warehouse_address: finalAddress,
-      });
+    const authUser = data.user;
 
-      if (profileError) {
-        alert(profileError.message);
-        console.error("Profile insert error:", profileError);
-        return;
-      }
+    if (!authUser) {
+      alert("User not created");
+      return;
+    }
 
-      alert("Account created. Check your email to confirm it, then sign in.");
+    const { error: profileError } = await supabase.from("profiles").upsert({
+      id: authUser.id,
+      customer_id: generatedCustomerId,
+      full_name: user.name.trim(),
+      email: safeEmail,
+      warehouse_country: user.warehouseCountry,
+      warehouse_address: finalAddress,
+    });
 
-      setAuthMode("login");
-      setIsRegistered(false);
+    if (profileError) {
+      alert(profileError.message);
+      console.error("Profile insert error:", profileError);
+      return;
+    }
+
+    alert("Account created. Check your email to confirm it, then sign in.");
+
+    setAuthMode("login");
+    setIsRegistered(false);
+    setUser((prev) => ({
+      ...prev,
+      email: safeEmail,
+      password: "",
+      id: generatedCustomerId,
+      address: finalAddress,
+    }));
+  } finally {
+    setAuthLoading(false);
+  }
+};
+const handleLogin = async (e: React.FormEvent) => {
+  e.preventDefault();
+  setAuthLoading(true);
+
+  try {
+    const safeEmail = user.email.trim().toLowerCase();
+    const safePassword = user.password.trim();
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: safeEmail,
+      password: safePassword,
+    });
+
+    if (error) {
+      alert(error.message);
+      console.error("Login error:", error);
+      return;
+    }
+
+    if (!data.user) {
+      alert("Login failed");
+      return;
+    }
+
+    const loaded = await loadProfile(data.user.id);
+
+    if (!loaded) {
       setUser((prev) => ({
         ...prev,
+        email: data.user.email ?? safeEmail,
         password: "",
-        id: generatedCustomerId,
-        address: finalAddress,
       }));
-    } finally {
-      setAuthLoading(false);
     }
-  };
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthLoading(true);
-
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: user.email,
-        password: user.password,
-      });
-
-      if (error) {
-        alert(error.message);
-        console.error("Login error:", error);
-        return;
-      }
-
-      if (!data.user) {
-        alert("Login failed");
-        return;
-      }
-
-      const loaded = await loadProfile(data.user.id);
-
-      if (!loaded) {
-        setUser((prev) => ({
-          ...prev,
-          email: data.user.email ?? prev.email,
-          password: "",
-        }));
-      }
-
-      setIsRegistered(true);
-    } finally {
-      setAuthLoading(false);
-    }
-  };
+    setIsRegistered(true);
+  } finally {
+    setAuthLoading(false);
+  }
+};
 
   const handleLogout = async () => {
     const { error } = await supabase.auth.signOut();
