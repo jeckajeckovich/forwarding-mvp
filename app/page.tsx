@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
 const tariffs = [
@@ -79,20 +79,22 @@ type PackageItem = {
   notes: string;
 };
 
+const BLANK_USER: User = {
+  name: "",
+  email: "",
+  password: "",
+  warehouseCountry: "Germany",
+  id: "",
+  address: "",
+};
+
 export default function Page() {
   const [authMode, setAuthMode] = useState<AuthMode>("register");
   const [loadingSession, setLoadingSession] = useState(true);
   const [authLoading, setAuthLoading] = useState(false);
   const [isRegistered, setIsRegistered] = useState(false);
 
-  const [user, setUser] = useState<User>({
-    name: "",
-    email: "",
-    password: "",
-    warehouseCountry: "Germany",
-    id: "",
-    address: "",
-  });
+  const [user, setUser] = useState<User>(BLANK_USER);
 
   const [packages, setPackages] = useState<PackageItem[]>([]);
   const [selectedPackages, setSelectedPackages] = useState<string[]>([]);
@@ -110,7 +112,17 @@ export default function Page() {
     status: "Expected",
   });
 
-  async function loadProfile(authUserId: string) {
+  // Prevents the auth listener from reacting to the SIGNED_IN event that
+  // Supabase emits automatically when signUp creates a session (auto-confirm
+  // mode). We sign out immediately after inserting the profile, so we block
+  // the listener for the duration of the registration handler.
+  const isRegistering = useRef(false);
+  // Ensures we only call setLoadingSession(false) once — on the first
+  // onAuthStateChange event, which is always INITIAL_SESSION.
+  const initDone = useRef(false);
+
+  // ─── Load profile from DB ───────────────────────────────────────────────
+  async function loadProfile(authUserId: string): Promise<boolean> {
     const { data, error } = await supabase
       .from("profiles")
       .select("full_name, email, customer_id, warehouse_country, warehouse_address")
@@ -122,108 +134,67 @@ export default function Page() {
       return false;
     }
 
-    if (!data) {
-      return false;
-    }
+    if (!data) return false;
 
-    setUser((prev) => ({
-      ...prev,
+    setUser({
       name: data.full_name ?? "",
       email: data.email ?? "",
       password: "",
       warehouseCountry: (data.warehouse_country as WarehouseCountry) ?? "Germany",
       id: data.customer_id ?? "",
       address: data.warehouse_address ?? "",
-    }));
+    });
 
     return true;
   }
 
+  // ─── Single source of truth for auth state ──────────────────────────────
+  // We rely ONLY on onAuthStateChange — no getSession() call.
+  // The listener always fires INITIAL_SESSION on mount, which bootstraps the
+  // session check without the race conditions caused by running two parallel
+  // async flows.
   useEffect(() => {
     let mounted = true;
 
-    async function bootstrap() {
-      try {
-        const { data, error } = await supabase.auth.getSession();
-
-        if (error) {
-          console.error("Session error:", error);
-          return;
-        }
-
-        const session = data.session;
-
-        if (!mounted) return;
-
-        if (session?.user) {
-          const loaded = await loadProfile(session.user.id);
-
-          if (!mounted) return;
-
-          setIsRegistered(true);
-
-          if (!loaded) {
-            setUser((prev) => ({
-              ...prev,
-              email: session.user.email ?? "",
-              password: "",
-            }));
-          }
-        } else {
-          setIsRegistered(false);
-        }
-      } catch (err) {
-        console.error("Bootstrap crash:", err);
-        if (mounted) {
-          setIsRegistered(false);
-        }
-      } finally {
-        if (mounted) {
-          setLoadingSession(false);
-        }
-      }
-    }
-
-    bootstrap();
-
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (!mounted) return;
 
       try {
         if (session?.user) {
-          const loaded = await loadProfile(session.user.id);
+          // Skip any SIGNED_IN triggered by signUp during registration.
+          // handleRegister will call signOut() to clean up the auto-session.
+          if (isRegistering.current) return;
 
+          const loaded = await loadProfile(session.user.id);
           if (!mounted) return;
 
-          setIsRegistered(true);
-
-          if (!loaded) {
-            setUser((prev) => ({
-              ...prev,
-              email: session.user.email ?? "",
-              password: "",
-            }));
+          if (loaded) {
+            setIsRegistered(true);
+          } else {
+            // Session exists but profile is missing (e.g. profile insert
+            // failed during a previous registration attempt). Sign out
+            // gracefully so the user can try again from the auth form.
+            console.warn("Session found but profile is missing — signing out.");
+            await supabase.auth.signOut();
+            setIsRegistered(false);
+            setUser(BLANK_USER);
           }
         } else {
+          // No session (INITIAL_SESSION with null, or SIGNED_OUT).
           setIsRegistered(false);
-          setUser({
-            name: "",
-            email: "",
-            password: "",
-            warehouseCountry: "Germany",
-            id: "",
-            address: "",
-          });
+          if (event === "SIGNED_OUT") {
+            setUser(BLANK_USER);
+          }
         }
       } catch (err) {
-        console.error("Auth state change crash:", err);
-        if (mounted) {
-          setIsRegistered(false);
-        }
+        console.error("Auth state change error:", err);
+        if (mounted) setIsRegistered(false);
       } finally {
-        if (mounted) {
+        // Mark init complete and reveal the UI on the very first event.
+        if (mounted && !initDone.current) {
+          initDone.current = true;
           setLoadingSession(false);
         }
       }
@@ -235,132 +206,114 @@ export default function Page() {
     };
   }, []);
 
-const handleRegister = async (e: React.FormEvent) => {
-  e.preventDefault();
-  setAuthLoading(true);
+  // ─── Register ────────────────────────────────────────────────────────────
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    isRegistering.current = true; // block the auth listener during this flow
 
-  try {
-    const generatedCustomerId = generateCustomerId();
-    const finalAddress = makeAddress(
-      user.name || "Customer",
-      generatedCustomerId,
-      user.warehouseCountry
-    );
+    try {
+      const safeEmail = user.email.trim().toLowerCase();
+      const safePassword = user.password.trim();
+      const generatedCustomerId = generateCustomerId();
+      const finalAddress = makeAddress(
+        user.name.trim() || "Customer",
+        generatedCustomerId,
+        user.warehouseCountry
+      );
 
-    const safeEmail = user.email.trim().toLowerCase();
-    const safePassword = user.password.trim();
+      // 1. Create auth user
+      const { data, error: signUpError } = await supabase.auth.signUp({
+        email: safeEmail,
+        password: safePassword,
+      });
 
-    const { data, error } = await supabase.auth.signUp({
-      email: safeEmail,
-      password: safePassword,
-    });
+      if (signUpError) {
+        alert(signUpError.message);
+        console.error("Sign up error:", signUpError);
+        return;
+      }
 
-    if (error) {
-      alert(error.message);
-      console.error("Sign up error:", error);
-      return;
+      const authUser = data.user;
+      if (!authUser) {
+        alert("User was not created. Please try again.");
+        return;
+      }
+
+      // 2. Insert profile (anon key — RLS allows insert with check(true))
+      const { error: profileError } = await supabase.from("profiles").upsert({
+        id: authUser.id,
+        customer_id: generatedCustomerId,
+        full_name: user.name.trim(),
+        email: safeEmail,
+        warehouse_country: user.warehouseCountry,
+        warehouse_address: finalAddress,
+      });
+
+      if (profileError) {
+        alert(profileError.message);
+        console.error("Profile insert error:", profileError);
+        return;
+      }
+
+      // 3. Kill any auto-session Supabase created (auto-confirm mode).
+      //    The onAuthStateChange listener is blocked via isRegistering, so
+      //    the resulting SIGNED_OUT event is a no-op for the UI.
+      await supabase.auth.signOut();
+
+      // 4. Guide the user to log in manually.
+      alert("Account created! If email confirmation is required, check your inbox first, then sign in.");
+      setAuthMode("login");
+      setUser((prev) => ({ ...prev, email: safeEmail, password: "" }));
+    } finally {
+      isRegistering.current = false;
+      setAuthLoading(false);
     }
+  };
 
-    const authUser = data.user;
+  // ─── Login ───────────────────────────────────────────────────────────────
+  // We only handle the Supabase call here. The onAuthStateChange listener is
+  // the single place that calls loadProfile and sets isRegistered(true).
+  // This eliminates the race / double-load that the old code had.
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
 
-    if (!authUser) {
-      alert("User not created");
-      return;
+    try {
+      const safeEmail = user.email.trim().toLowerCase();
+      const safePassword = user.password.trim();
+
+      const { error } = await supabase.auth.signInWithPassword({
+        email: safeEmail,
+        password: safePassword,
+      });
+
+      if (error) {
+        alert(error.message);
+        console.error("Login error:", error);
+      }
+      // On success the auth listener fires SIGNED_IN, loads the profile,
+      // and sets isRegistered(true) — no further action needed here.
+    } finally {
+      setAuthLoading(false);
     }
+  };
 
-    const { error: profileError } = await supabase.from("profiles").upsert({
-      id: authUser.id,
-      customer_id: generatedCustomerId,
-      full_name: user.name.trim(),
-      email: safeEmail,
-      warehouse_country: user.warehouseCountry,
-      warehouse_address: finalAddress,
-    });
-
-    if (profileError) {
-      alert(profileError.message);
-      console.error("Profile insert error:", profileError);
-      return;
-    }
-
-    alert("Account created. Check your email to confirm it, then sign in.");
-
-    setAuthMode("login");
-    setIsRegistered(false);
-    setUser((prev) => ({
-      ...prev,
-      email: safeEmail,
-      password: "",
-      id: generatedCustomerId,
-      address: finalAddress,
-    }));
-  } finally {
-    setAuthLoading(false);
-  }
-};
-const handleLogin = async (e: React.FormEvent) => {
-  e.preventDefault();
-  setAuthLoading(true);
-
-  try {
-    const safeEmail = user.email.trim().toLowerCase();
-    const safePassword = user.password.trim();
-
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: safeEmail,
-      password: safePassword,
-    });
-
-    if (error) {
-      alert(error.message);
-      console.error("Login error:", error);
-      return;
-    }
-
-    if (!data.user) {
-      alert("Login failed");
-      return;
-    }
-
-    const loaded = await loadProfile(data.user.id);
-
-    if (!loaded) {
-      setUser((prev) => ({
-        ...prev,
-        email: data.user.email ?? safeEmail,
-        password: "",
-      }));
-    }
-
-    setIsRegistered(true);
-  } finally {
-    setAuthLoading(false);
-  }
-};
-
+  // ─── Logout ──────────────────────────────────────────────────────────────
   const handleLogout = async () => {
     const { error } = await supabase.auth.signOut();
-
     if (error) {
       alert(error.message);
       console.error("Logout error:", error);
       return;
     }
-
-    setIsRegistered(false);
+    // The auth listener handles resetting state on SIGNED_OUT.
     setAuthMode("login");
     setPackages([]);
     setSelectedPackages([]);
-    setUser({
-      name: "",
-      email: "",
-      password: "",
-      warehouseCountry: "Germany",
-      id: "",
-      address: "",
-    });
   };
 
+  // ─── Package helpers ─────────────────────────────────────────────────────
   const handleAddPackage = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPackage.tracking || !newPackage.store || !newPackage.weight) return;
@@ -379,12 +332,7 @@ const handleLogin = async (e: React.FormEvent) => {
     };
 
     setPackages((prev) => [pkg, ...prev]);
-    setNewPackage({
-      tracking: "",
-      store: "",
-      weight: "",
-      status: "Expected",
-    });
+    setNewPackage({ tracking: "", store: "", weight: "", status: "Expected" });
   };
 
   const togglePackage = (id: string) => {
@@ -427,13 +375,7 @@ const handleLogin = async (e: React.FormEvent) => {
     setPackages((prev) =>
       prev.map((pkg) =>
         selectedPackages.includes(pkg.id)
-          ? {
-              ...pkg,
-              status: "Shipped",
-              shippingAddress: deliveryAddress,
-              shippingMethod,
-              storageDaysLeft: 0,
-            }
+          ? { ...pkg, status: "Shipped", shippingAddress: deliveryAddress, shippingMethod, storageDaysLeft: 0 }
           : pkg
       )
     );
@@ -441,6 +383,8 @@ const handleLogin = async (e: React.FormEvent) => {
     setDeliveryAddress("");
     setActiveTab("dashboard");
   };
+
+  // ─── Render ───────────────────────────────────────────────────────────────
 
   if (loadingSession) {
     return (
@@ -651,7 +595,6 @@ const handleLogin = async (e: React.FormEvent) => {
                   No packages yet. Go to <span className="font-medium text-slate-900">Add package</span> and add your first tracking number.
                 </div>
               )}
-
               {packages.map((pkg) => (
                 <div key={pkg.id} className="rounded-2xl border border-slate-200 p-4">
                   <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -685,7 +628,6 @@ const handleLogin = async (e: React.FormEvent) => {
           <section className="grid gap-6 lg:grid-cols-[1fr_1fr]">
             <form onSubmit={handleAddPackage} className="rounded-3xl bg-white p-6 shadow-sm">
               <h2 className="text-2xl font-bold">Add new package</h2>
-
               <div className="mt-6 space-y-4">
                 <div>
                   <label className="mb-2 block text-sm font-medium">Tracking number</label>
@@ -697,7 +639,6 @@ const handleLogin = async (e: React.FormEvent) => {
                     required
                   />
                 </div>
-
                 <div>
                   <label className="mb-2 block text-sm font-medium">Store name</label>
                   <input
@@ -708,7 +649,6 @@ const handleLogin = async (e: React.FormEvent) => {
                     required
                   />
                 </div>
-
                 <div className="grid gap-4 md:grid-cols-2">
                   <div>
                     <label className="mb-2 block text-sm font-medium">Estimated weight (kg)</label>
@@ -722,7 +662,6 @@ const handleLogin = async (e: React.FormEvent) => {
                       required
                     />
                   </div>
-
                   <div>
                     <label className="mb-2 block text-sm font-medium">Status</label>
                     <select
@@ -737,12 +676,10 @@ const handleLogin = async (e: React.FormEvent) => {
                   </div>
                 </div>
               </div>
-
               <button type="submit" className="mt-6 w-full rounded-2xl bg-slate-900 px-4 py-3 font-medium text-white">
                 Add package to account
               </button>
             </form>
-
             <div className="rounded-3xl bg-white p-6 shadow-sm">
               <h2 className="text-2xl font-bold">Package instructions</h2>
               <div className="mt-6 space-y-4 text-slate-600">
@@ -781,7 +718,6 @@ const handleLogin = async (e: React.FormEvent) => {
                 ))}
               </div>
             </div>
-
             <div className="rounded-3xl bg-white p-6 shadow-sm">
               <h2 className="text-2xl font-bold">Selected summary</h2>
               <div className="mt-6 space-y-4">
@@ -804,7 +740,6 @@ const handleLogin = async (e: React.FormEvent) => {
           <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
             <div className="rounded-3xl bg-white p-6 shadow-sm">
               <h2 className="text-2xl font-bold">Shipment checkout</h2>
-
               <div className="mt-6 grid gap-4 md:grid-cols-2">
                 <div>
                   <label className="mb-2 block text-sm font-medium">Destination country</label>
@@ -818,7 +753,6 @@ const handleLogin = async (e: React.FormEvent) => {
                     ))}
                   </select>
                 </div>
-
                 <div>
                   <label className="mb-2 block text-sm font-medium">Shipping method</label>
                   <select
@@ -831,7 +765,6 @@ const handleLogin = async (e: React.FormEvent) => {
                   </select>
                 </div>
               </div>
-
               <div className="mt-4">
                 <label className="mb-2 block text-sm font-medium">Final delivery address</label>
                 <textarea
@@ -841,7 +774,6 @@ const handleLogin = async (e: React.FormEvent) => {
                   placeholder="Recipient name, street, city, postal code, country, phone number"
                 />
               </div>
-
               <div className="mt-6 rounded-2xl border border-slate-200 p-4">
                 <div className="space-y-3">
                   <label className="flex items-center gap-3 text-sm text-slate-700">
@@ -859,7 +791,6 @@ const handleLogin = async (e: React.FormEvent) => {
                 </div>
               </div>
             </div>
-
             <div className="rounded-3xl bg-white p-6 shadow-sm">
               <h2 className="text-2xl font-bold">Payment summary</h2>
               <div className="mt-6 rounded-2xl bg-slate-900 p-5 text-white">
@@ -871,7 +802,6 @@ const handleLogin = async (e: React.FormEvent) => {
                 <div className="mt-2 flex justify-between text-sm"><span>Service fee</span><span>{money(serviceFee)}</span></div>
                 <div className="mt-4 flex justify-between border-t border-slate-700 pt-4 text-lg font-bold"><span>Total</span><span>{money(total)}</span></div>
               </div>
-
               <button
                 onClick={createShipment}
                 className="mt-6 w-full rounded-2xl bg-slate-900 px-4 py-3 font-medium text-white"
